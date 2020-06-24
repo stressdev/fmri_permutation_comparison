@@ -1,0 +1,499 @@
+---
+title: "Permutation comparison and check"
+author: "John Flournoy"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(RNifti)
+library(ggplot2)
+colors <- c('#5C2A70',
+            '#C09A9E',
+            '#F3EDE8',
+            '#F3D0D0',
+            '#44ADF1')
+```
+
+In this report I compare the output of Randomise Z-scores and p-values (corrected for multiple comparisons and enhanced by cluster extent) to the parametric output from group-level FEAT models. The focus is on whether there is an expected positive association between the test statistics generated via the two methods, and how the corrected p-values correspond to this. Primarily, this is a quality assurance check. Each of these sets of results from Randomise were generated using 10,000 permutations that correctly account for covariates and nesting (though there isn't any nesting in these data). When test statistics do not agree between the parametric and permuted version, generally the permuted version should be trusted. 
+
+In the case of David's data, we can also look at the correspondence between AFNI's permutation and cluster-enhancement method. However, this comparison has to be interpretted in light of the fact that permutation test statistics computed by 3dttest++ do not appropriately handle covariates. More on that below.
+
+Scripts used to automate Randomise and TFCE thresholding are found here: https://github.com/stressdev/randomise_tfce_helpers
+
+# David's model
+
+```{r}
+#afni test is made up of 24 volumes
+#[ 3] For (control = 0) - (control = 1), (control = 0), and (control = 1):
+#[x4] for mean, female, age, inc_needs:
+#[x2] regression coef and Z score.
+#
+# 1: control0-control1_mean
+# 2: control0-control1_Zscr
+# 3: control0-control1_FEMALE
+# 4: control0-control1_FEMALE_Zscr
+# ...
+fslrandomize1 <- RNifti::readNifti(file = '~/otherhome/data/randomise_test/randomise_tstat1.nii.gz')
+fslrandomize2 <- RNifti::readNifti(file = '~/otherhome/data/randomise_test/randomise_tstat2.nii.gz')
+fslrandomize1_tfce <- RNifti::readNifti(file = '~/otherhome/data/randomise_test/randomise_tfce_corrp_tstat1.nii.gz')
+fslrandomize2_tfce <- RNifti::readNifti(file = '~/otherhome/data/randomise_test/randomise_tfce_corrp_tstat2.nii.gz')
+afni3dttest <- RNifti::readNifti(file = '~/otherhome/data/3dttest_test/test.nii')
+afni3dttest_ETAC <- RNifti::readNifti(file = '~/otherhome/data/3dttest_test/etac.SDL.ETACmask.global.2sid.5perc.nii.gz')
+orig <- RNifti::readNifti(file = '/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/ThreatReactivity/David/Spank/Fear_GT_Calm_Spank_n147.gfeat/cope1.feat/stats/zstat1.nii.gz')
+
+mask <- RNifti::readNifti(file = '/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/ThreatReactivity/David/Spank/Fear_GT_Calm_Spank_n147.gfeat/cope1.feat/mask.nii.gz')
+
+corrected_p <- p.adjust(pnorm(abs(orig[mask != 0]), lower.tail = FALSE)*2, 'fdr')
+orig_p_fdr <- orig
+orig_p_fdr[] <- 0
+orig_p_fdr[mask != 0] <- 1-corrected_p #to compare with FSL which also uses this convention
+```
+
+I'll sample 50,000 voxels from the full data-set to get a good sense of correspondence between methods.
+
+```{r}
+set.seed(2472)
+i <- sample(1:length(fslrandomize1[mask != 0]), size = 5e4)
+```
+
+## Comparing Randomise, 3dttest++, and the original parametric _t_-tests {.tabset}
+
+### The Two Randomise _t_-stats
+
+I think the two contrasts are just the inverse of one another. This is good, because it looks like TFCE is a one-sided operation.
+
+```{r}
+ggplot2::qplot(as.vector(fslrandomize1[mask != 0])[i], as.vector(fslrandomize2[mask != 0])[i]) + 
+  ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+        panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+        panel.grid.minor = element_blank())
+```
+
+### Randomise _t_-statistic versus TFCE _p_-value
+
+As the tstat gets bigger in the positive direction, the (1-p-value) gets bigger (but not 1:1 given the spatial info)
+notice nothing exceeds the significance threshold of .95 (one sided) or .975 (two-sided).
+
+```{r}
+ggplot2::qplot(as.vector(fslrandomize1[mask != 0])[i], as.vector(fslrandomize1_tfce[mask != 0])[i]) + 
+  theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+        panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+        panel.grid.minor = element_blank()) + 
+  ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  ggplot2::coord_cartesian(y = c(0,1))
+```
+
+```{r}
+ggplot2::qplot(as.vector(fslrandomize2[mask != 0])[i], as.vector(fslrandomize2_tfce[mask != 0])[i]) + 
+  theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+        panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+        panel.grid.minor = element_blank()) + 
+  ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  ggplot2::coord_cartesian(y = c(0,1))
+```
+
+### Compare Randomise to the parametric tests
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig[mask != 0])[i], y = as.vector(fslrandomize1[mask != 0])[i]), aes(x = x, y = y)) + 
+  ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+  ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                               labels = c(10, 100, 1000, 10000), name = 'Count',
+                               low = colors[[1]], high = colors[[5]]) +
+  ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                labels = c(10, 100, 1000, 10000), name = 'Count',
+                                low = colors[[1]], high = colors[[5]]) +
+  theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+        panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+        panel.grid.minor = element_blank()) + 
+  ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  ggplot2::geom_abline(intercept = 0, slope = 1) + 
+  labs(x = 'Original parametric t-test', y = 'Randomise permutation Z-score')
+```
+
+Positive:
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig[mask != 0])[i], y = as.vector(fslrandomize1_tfce[mask != 0])[i]), aes(x = x, y = y)) + 
+  ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+  ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                               labels = c(10, 100, 1000, 10000), name = 'Count',
+                               low = colors[[1]], high = colors[[5]]) +
+  ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                labels = c(10, 100, 1000, 10000), name = 'Count',
+                                low = colors[[1]], high = colors[[5]]) +
+  theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+        panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+        panel.grid.minor = element_blank()) + 
+  ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  ylim(c(0,1)) + 
+  labs(x = 'Original parametric t-test', y = 'Randomise (corrected) TFCE 1 - p')
+```
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig_p_fdr[mask != 0])[i], y = as.vector(fslrandomize1_tfce[mask != 0])[i]), aes(x = x, y = y)) + 
+  ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  xlim(c(0,1)) + 
+  ylim(c(0,1)) + 
+  labs(x = 'FDR-corrected 1-p for parametric t-test', y = 'Randomise (corrected) TFCE 1 - p')
+```
+
+Negative:
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig[mask != 0])[i], y = as.vector(fslrandomize2_tfce[mask != 0])[i]), aes(x = x, y = y)) + 
+  ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  ylim(c(0,1)) + 
+  labs(x = 'Original parametric t-test', y = 'Randomise (corrected) TFCE 1 - p')
+```
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig_p_fdr[mask != 0])[i], y = as.vector(fslrandomize2_tfce[mask != 0])[i]), aes(x = x, y = y)) + 
+ ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) + 
+  xlim(c(0,1)) + 
+  ylim(c(0,1)) + 
+  labs(x = 'FDR-corrected 1-p for parametric t-test', y = 'Randomise (corrected) TFCE 1 - p')
+```
+
+Positive and Negative together:
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig_p_fdr[mask != 0])[i], y = as.vector(fslrandomize2[mask != 0])[i]), 
+                aes(x = x, y = y, group = y > 0)) + 
+ ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  labs(x = 'FDR-corrected 1-p for parametric t-test', y = 'Randomise Z')
+```
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig_p_fdr[mask != 0])[i], 
+                           y = as.vector(fslrandomize1_tfce[mask != 0])[i] + as.vector(fslrandomize2_tfce[mask != 0])[i]), 
+                aes(x = x, y = y)) + 
+  ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  labs(x = 'FDR-corrected 1-p for parametric t-test', y = 'Randomise (corrected) TFCE 1 - p')
+```
+
+### Compare 3dttest++ to the parametric tests
+
+Note that the documentation for 3dttest++ states:
+
+```
++ Permutation with '-covariates' may not work the way you wish.
+  In the past [pre-March 2020], covariates were NOT permuted along
+  with their data. Now, covariate ARE permuted along with their data.
+  This latter method seems more logical to me [RWCox].
+```
+
+This is not consistent with the methods providing the basis for FSL's Randomise as reviewed in:
+
+>Winkler, A. M., Ridgway, G. R., Webster, M. A., Smith, S. M., & Nichols, T. E. (2014). Permutation inference for the general linear model. NeuroImage, 92, 381–397. https://doi.org/10.1016/j.neuroimage.2014.01.060
+
+The intuition is that we are not building a null distribution for the whole regression (including covariates) but rather just for the predictor of interest. For that reason, the covariates should be allowed to account for the variance they can explain in each permutation.
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig[mask != 0])[i], y = as.vector(unlist(afni3dttest[,,,1,2][mask != 0]))[i]), aes(x = x, y = y)) + 
+ ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  ggplot2::geom_abline(intercept = 0, slope = 1) + 
+  labs(x = 'Original parametric t-test', y = '3dttest++ permutation Z-score')
+```
+
+```{r}
+#Compare to orig afni:
+ggplot2::ggplot(data.frame(x = as.vector(orig_p_fdr[mask != 0])[i], y = as.vector(unlist(afni3dttest[,,,1,2][mask != 0]))[i]), 
+                aes(x = x, y = y, group = y > 0)) + 
+  ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+  labs(x = 'FDR corrected parametric t-test 1 - p', y = '3dttest++ permutation Z-score')
+```
+
+Applying ETAC to the permuted data did not result in any clusters:
+
+```{r}
+sum(afni3dttest_ETAC != 0)
+```
+
+```{r echo = FALSE}
+rm(list = ls())
+colors <- c('#5C2A70',
+            '#C09A9E',
+            '#F3EDE8',
+            '#F3D0D0',
+            '#44ADF1')
+```
+
+# Maya's model
+
+This is a comparison of the test statics generated from the original parametric group FEAT model, and the same model re-estimated using non-parametric permutation testing. We can also compare the original *p*-value (in FSL land, it's actually always 1-*p*) with the TFCE corrected *p*-value. Below, find the two sets of plots. _Note that TFCE is a single-sided procedure_.
+
+
+```{r}
+orig_tstat <- dir('/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/WMShapes/LogItN_high_v_low_age_sex_use.gfeat/cope1.feat/stats/', pattern = '^zstat[0-9].nii.gz', full.names = TRUE)
+randomise_tstat <- dir('/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/WMShapes/LogItN_high_v_low_age_sex_use.gfeat/randomise_continuous/', pattern = '.*gfeat_tstat[0-9].nii.gz', full.names = TRUE)
+
+randomise_p <- dir('/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/WMShapes/LogItN_high_v_low_age_sex_use.gfeat/randomise_continuous/', pattern = '.*gfeat_tfce_corrp_tstat[0-9].nii.gz', full.names = TRUE)
+
+mask_file <- dir('/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/WMShapes/LogItN_high_v_low_age_sex_use.gfeat/cope1.feat/', pattern = 'mask.nii.gz', full.names = TRUE)
+mask <- RNifti::readNifti(mask_file)
+```
+
+## Comparison Plots (*Z* scores) {.tabset}
+
+```{r results='asis'}
+nvx <- 5e4
+j <- sample(1:sum(mask != 0), size = nvx)
+
+if(length(orig_tstat) == length(randomise_tstat)){
+  for(i in 1:length(orig_tstat)){
+    cat(paste0('\n\n### ', basename(orig_tstat[[i]]), '\n\n'))
+    orig <- RNifti::readNifti(orig_tstat[[i]])
+    randomise <- RNifti::readNifti(randomise_tstat[[i]])
+    
+    if(!length(randomise) == length(orig)){
+      stop('Mismatch in dimensions of comparison images')
+    }
+    
+    
+    voxel_df <- data.frame(o = as.vector(orig[mask != 0])[j], 
+                           r = as.vector(randomise[mask != 0])[j])
+    
+    p <- ggplot2::ggplot(voxel_df, aes(x = o, y = r)) +
+      ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 25, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+      ggplot2::geom_abline(intercept = 0, slope = 1) + 
+      ggplot2::labs(x = 'Original parametric Z', y = 'Randomise Z') + 
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) 
+    print(p)
+  }
+} else {
+  stop('Length of original and randomise stats is not the same')
+}
+```
+
+## Comparison Plots (*p*-values) {.tabset}
+
+The horizontal line is at the threshold p = .025 to show what survives a two-sided test at alpha = .05. Note that since this is just a sample of all voxels in the mask, this may not agree perfectly with what you would see on thresholded maps. This is just to check that higher uncorrected *p*-values tend to go with higher TFCE corrected *p*-values.
+
+```{r, results='asis'}
+if(length(orig_tstat) == length(randomise_tstat)){
+  for(i in 1:length(orig_tstat)){
+    cat(paste0('\n\n### ', basename(orig_tstat[[i]]), '\n\n'))
+    orig <- RNifti::readNifti(orig_tstat[[i]])
+    randomise <- RNifti::readNifti(randomise_p[[i]])
+    
+    if(!length(randomise) == length(orig)){
+      stop('Mismatch in dimensions of comparison images')
+    }
+    
+    
+    voxel_df <- data.frame(o = pnorm(as.vector(orig[mask != 0])[j]), 
+                           r = as.vector(randomise[mask != 0])[j])
+    
+    p <- ggplot2::ggplot(voxel_df, aes(x = o, y = r)) +
+      ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+      ggplot2::labs(x = expression(paste('Original parametric ', P(Z),' (uncorrected)')), 
+                    y = expression(paste('Randomise TFCE ', italic(p),'-value (corrected)'))) + 
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_hline(yintercept = .975, color = 'black', alpha = .5)
+    print(p)
+  }
+} else {
+  stop('Length of original and randomise stats is not the same')
+}
+```
+
+# Natalie's model
+
+This is a comparison of the test statics generated from the original parametric group FEAT model, and the same model re-estimated using non-parametric permutation testing. We can also compare the original *p*-value (in FSL land, it's actually always 1-*p*) with the TFCE corrected *p*-value. Below, find the two sets of plots. _Note that TFCE is a single-sided procedure_.
+
+
+```{r}
+orig_tstat <- dir('/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/ThreatReactivity/Natalie/20200430_ThreatReactivity_n151_Tanner_Age_cope2.gfeat/cope1.feat/stats/', pattern = '^zstat[0-9].nii.gz', full.names = TRUE)
+randomise_tstat <- dir('/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/ThreatReactivity/Natalie/20200430_ThreatReactivity_n151_Tanner_Age_cope2.gfeat/randomise/', pattern = '.*gfeat_tstat[0-9].nii.gz', full.names = TRUE)
+
+randomise_p <- dir('/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/ThreatReactivity/Natalie/20200430_ThreatReactivity_n151_Tanner_Age_cope2.gfeat/randomise/', pattern = '.*gfeat_tfce_corrp_tstat[0-9].nii.gz', full.names = TRUE)
+
+mask_file <- dir('/net/holynfs01/srv/export/mclaughlin/share_root/stressdevlab/dep_threat_pipeline/Group/ThreatReactivity/Natalie/20200430_ThreatReactivity_n151_Tanner_Age_cope2.gfeat/cope1.feat/', pattern = 'mask.nii.gz', full.names = TRUE)
+mask <- RNifti::readNifti(mask_file)
+```
+
+## Comparison Plots (*Z* scores) {.tabset}
+
+```{r results='asis'}
+nvx <- 5e4
+j <- sample(1:sum(mask != 0), size = nvx)
+
+if(length(orig_tstat) == length(randomise_tstat)){
+  for(i in 1:length(orig_tstat)){
+    cat(paste0('\n\n### ', basename(orig_tstat[[i]]), '\n\n'))
+    orig <- RNifti::readNifti(orig_tstat[[i]])
+    randomise <- RNifti::readNifti(randomise_tstat[[i]])
+    
+    if(!length(randomise) == length(orig)){
+      stop('Mismatch in dimensions of comparison images')
+    }
+    
+    
+    voxel_df <- data.frame(o = as.vector(orig[mask != 0])[j], 
+                           r = as.vector(randomise[mask != 0])[j])
+    
+    p <- ggplot2::ggplot(voxel_df, aes(x = o, y = r)) +
+      ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 25, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+      ggplot2::geom_abline(intercept = 0, slope = 1) + 
+      ggplot2::labs(x = 'Original parametric Z', y = 'Randomise Z') + 
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) 
+    print(p)
+  }
+} else {
+  stop('Length of original and randomise stats is not the same')
+}
+```
+
+## Comparison Plots (*p*-values) {.tabset}
+
+The horizontal line is at the threshold p = .025 to show what survives a two-sided test at alpha = .05. Note that since this is just a sample of all voxels in the mask, this may not agree perfectly with what you would see on thresholded maps. This is just to check that higher uncorrected *p*-values tend to go with higher TFCE corrected *p*-values.
+
+```{r, results='asis'}
+if(length(orig_tstat) == length(randomise_tstat)){
+  for(i in 1:length(orig_tstat)){
+    cat(paste0('\n\n### ', basename(orig_tstat[[i]]), '\n\n'))
+    orig <- RNifti::readNifti(orig_tstat[[i]])
+    randomise <- RNifti::readNifti(randomise_p[[i]])
+    
+    if(!length(randomise) == length(orig)){
+      stop('Mismatch in dimensions of comparison images')
+    }
+    
+    
+    voxel_df <- data.frame(o = pnorm(as.vector(orig[mask != 0])[j]), 
+                           r = as.vector(randomise[mask != 0])[j])
+    
+    p <- ggplot2::ggplot(voxel_df, aes(x = o, y = r)) +
+      ggplot2::geom_hex(aes(fill = log(..count..), color = log(..count..)), bins = 30, size = .25) +
+      ggplot2::scale_fill_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      ggplot2::scale_color_gradient(breaks = log(c(10, 100, 1000, 10000)), 
+                                   labels = c(10, 100, 1000, 10000), name = 'Count',
+                                   low = colors[[1]], high = colors[[5]]) +
+      theme(panel.background = element_rect(fill = colors[[3]], size = 0), 
+            panel.grid = element_line(color = colors[[4]], linetype = 'dotted'), 
+            panel.grid.minor = element_blank()) + 
+      ggplot2::geom_line(stat = 'smooth', method = 'gam', color = colors[[2]], size = 1) +
+      ggplot2::labs(x = expression(paste('Original parametric ', P(Z),' (uncorrected)')), 
+                    y = expression(paste('Randomise TFCE ', italic(p),'-value (corrected)'))) + 
+      ggplot2::geom_hline(yintercept = .975, color = 'black', alpha = .5)
+    print(p)
+  }
+} else {
+  stop('Length of original and randomise stats is not the same')
+}
+```
